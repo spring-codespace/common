@@ -235,7 +235,6 @@ public class AdvancedCsvToSqlGenerator {
     }
 
     public static void main(String[] args) {
-        /*
         if (args.length < 2) {
             System.out.println("Usage: java AdvancedCsvToSqlGenerator <csvFile> <tableName> [options]");
             System.out.println("Options:");
@@ -244,12 +243,9 @@ public class AdvancedCsvToSqlGenerator {
             System.out.println("  -d    Delimiter (default: ,)");
             return;
         }
-        */
 
-        // String csvFile = args[0];
-        String csvFile = "/home/vikunalabs/workspace/code/common/src/main/java/com/vikunalabs/common/sqlgen/input.csv";
-        // String tableName = args[1];
-        String tableName = "test_table";
+        String csvFile = args[0];
+        String tableName = args[1];
 
         AdvancedCsvToSqlGenerator generator = new AdvancedCsvToSqlGenerator();
 
