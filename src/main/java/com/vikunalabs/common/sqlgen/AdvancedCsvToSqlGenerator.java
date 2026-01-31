@@ -179,16 +179,16 @@ public class AdvancedCsvToSqlGenerator {
         }
 
         StringBuilder sql = new StringBuilder();
-        sql.append("INSERT INTO `").append(tableName).append("` ");
+        sql.append("INSERT INTO ").append(tableName).append(" ");
 
         if (formatSql) {
             sql.append("\n").append(indentString).append("(");
 
-            // Add column names with backticks (one per line if many columns)
+            // Add column names (one per line if many columns)
             if (headers.size() > 5) {
                 for (int i = 0; i < headers.size(); i++) {
                     sql.append("\n").append(indentString).append(indentString);
-                    sql.append("`").append(headers.get(i)).append("`");
+                    sql.append(headers.get(i));
                     if (i < headers.size() - 1) {
                         sql.append(",");
                     }
@@ -197,7 +197,7 @@ public class AdvancedCsvToSqlGenerator {
             } else {
                 // Short column list on one line
                 for (int i = 0; i < headers.size(); i++) {
-                    sql.append("`").append(headers.get(i)).append("`");
+                    sql.append(headers.get(i));
                     if (i < headers.size() - 1) {
                         sql.append(", ");
                     }
@@ -231,7 +231,7 @@ public class AdvancedCsvToSqlGenerator {
             // Compact format (original)
             sql.append("(");
             for (int i = 0; i < headers.size(); i++) {
-                sql.append("`").append(headers.get(i)).append("`");
+                sql.append(headers.get(i));
                 if (i < headers.size() - 1) {
                     sql.append(", ");
                 }
@@ -259,7 +259,7 @@ public class AdvancedCsvToSqlGenerator {
         }
 
         StringBuilder sql = new StringBuilder();
-        sql.append("INSERT INTO `").append(tableName).append("`");
+        sql.append("INSERT INTO ").append(tableName);
 
         if (formatSql) {
             sql.append("\n").append(indentString).append("(");
@@ -268,7 +268,7 @@ public class AdvancedCsvToSqlGenerator {
             if (headers.size() > 5) {
                 for (int i = 0; i < headers.size(); i++) {
                     sql.append("\n").append(indentString).append(indentString);
-                    sql.append("`").append(headers.get(i)).append("`");
+                    sql.append(headers.get(i));
                     if (i < headers.size() - 1) {
                         sql.append(",");
                     }
@@ -277,7 +277,7 @@ public class AdvancedCsvToSqlGenerator {
             } else {
                 // Short column list on one line
                 for (int i = 0; i < headers.size(); i++) {
-                    sql.append("`").append(headers.get(i)).append("`");
+                    sql.append(headers.get(i));
                     if (i < headers.size() - 1) {
                         sql.append(", ");
                     }
@@ -333,7 +333,7 @@ public class AdvancedCsvToSqlGenerator {
             // Compact format (original)
             sql.append(" (");
             for (int i = 0; i < headers.size(); i++) {
-                sql.append("`").append(headers.get(i)).append("`");
+                sql.append(headers.get(i));
                 if (i < headers.size() - 1) {
                     sql.append(", ");
                 }
