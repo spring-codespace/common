@@ -1,6 +1,9 @@
 package com.vikunalabs.common.sqlgen;
 
+import org.apache.commons.io.input.BOMInputStream;
+
 import java.io.*;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.text.*;
@@ -10,17 +13,29 @@ public class AdvancedCsvToSqlGenerator {
     private boolean includeTransaction;
     private String encoding;
     private String delimiter;
+    private boolean useBatchInsert;
+    private int batchSize;
+    private boolean formatSql;
+    private String indentString;
 
     public AdvancedCsvToSqlGenerator() {
-        this.includeTransaction = false;
+        this.includeTransaction = true;
         this.encoding = "UTF-8";
         this.delimiter = ",";
+        this.useBatchInsert = true;
+        this.batchSize = 1000;
+        this.formatSql = true;
+        this.indentString = "  "; // 2 spaces
     }
 
     public AdvancedCsvToSqlGenerator(boolean includeTransaction, String encoding, String delimiter) {
         this.includeTransaction = includeTransaction;
         this.encoding = encoding;
         this.delimiter = delimiter;
+        this.useBatchInsert = false;
+        this.batchSize = 1000;
+        this.formatSql = true;
+        this.indentString = "  ";
     }
 
     public List<String> generateSqlFromCsv(String csvFile, String tableName) throws IOException {
@@ -30,50 +45,76 @@ public class AdvancedCsvToSqlGenerator {
     public List<String> generateSqlFromCsv(String csvFile, String tableName,
                                            Map<String, String> columnMappings) throws IOException {
         List<String> sqlStatements = new ArrayList<>();
-        List<String> headers = new ArrayList<>();
 
-        if (includeTransaction) {
-            sqlStatements.add("START TRANSACTION;");
-        }
+        // Determine charset from encoding
+        Charset charset = Charset.forName(encoding);
 
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(Files.newInputStream(Paths.get(csvFile)), encoding))) {
+        // Use BOMInputStream to handle BOM in CSV files
+        try (InputStream inputStream = Files.newInputStream(Paths.get(csvFile));
+             BOMInputStream bomInputStream = new BOMInputStream(inputStream);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(bomInputStream, charset))) {
+
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+                throw new IOException("CSV file is empty");
+            }
+
+            // Remove outer quotes if present and split
+            List<String> headers = parseCsvLine(headerLine);
+
+            // Apply column mappings if provided
+            List<String> mappedHeaders = headers;
+            if (columnMappings != null) {
+                mappedHeaders = new ArrayList<>();
+                for (String header : headers) {
+                    mappedHeaders.add(columnMappings.getOrDefault(header, header));
+                }
+            }
+
+            if (includeTransaction) {
+                sqlStatements.add("START TRANSACTION;");
+            }
+
+            // Collect all rows
+            List<List<String>> allRows = new ArrayList<>();
             String line;
-            boolean isFirstLine = true;
-            int lineNumber = 0;
-
             while ((line = reader.readLine()) != null) {
-                lineNumber++;
-
                 if (line.trim().isEmpty()) {
                     continue;
                 }
 
-                try {
-                    if (isFirstLine) {
-                        headers = parseCsvLine(line);
-                        isFirstLine = false;
-                    } else {
-                        List<String> values = parseCsvLine(line);
+                List<String> values = parseCsvLine(line);
 
-                        // Apply column mappings if provided
-                        List<String> mappedHeaders = headers;
-                        if (columnMappings != null) {
-                            mappedHeaders = new ArrayList<>();
-                            for (String header : headers) {
-                                mappedHeaders.add(columnMappings.getOrDefault(header, header));
-                            }
-                        }
+                if (values.size() != headers.size()) {
+                    System.err.println("Warning: Row has " + values.size() +
+                            " values but header has " + headers.size() + " columns. Skipping row.");
+                    continue;
+                }
 
-                        String sql = generateInsertStatement(tableName, mappedHeaders, values);
-                        sqlStatements.add(sql);
-                    }
-                } catch (IllegalArgumentException e) {
-                    System.err.println("Invalid data format at line " + lineNumber + ": " + e.getMessage());
-                } catch (Exception e) {
-                    System.err.println("Unexpected error at line " + lineNumber + ": " + e.getMessage());
+                allRows.add(values);
+            }
+
+            // Generate INSERT statements based on batch mode
+            if (useBatchInsert) {
+                // Batch INSERT statements
+                for (int i = 0; i < allRows.size(); i += batchSize) {
+                    int end = Math.min(i + batchSize, allRows.size());
+                    List<List<String>> batch = allRows.subList(i, end);
+                    String sql = generateBatchInsertStatement(tableName, mappedHeaders, batch);
+                    sqlStatements.add(sql);
+                }
+            } else {
+                // Individual INSERT statements (original behavior)
+                for (List<String> values : allRows) {
+                    String sql = generateInsertStatement(tableName, mappedHeaders, values);
+                    sqlStatements.add(sql);
                 }
             }
+
+        } catch (Exception e) {
+            System.err.println("Error reading CSV: " + e.getMessage());
+            e.printStackTrace();
+            throw new IOException("Failed to process CSV file", e);
         }
 
         if (includeTransaction) {
@@ -83,41 +124,51 @@ public class AdvancedCsvToSqlGenerator {
         return sqlStatements;
     }
 
+    /**
+     * Parse a CSV line that might be wrapped in quotes
+     * Handles format: "field1,field2,field3" or field1,field2,field3
+     */
     private List<String> parseCsvLine(String line) {
-        List<String> result = new ArrayList<>();
+        List<String> values = new ArrayList<>();
+
+        // Remove leading/trailing whitespace
+        line = line.trim();
+
+        // Check if entire line is wrapped in quotes
+        if (line.startsWith("\"") && line.endsWith("\"")) {
+            // Remove outer quotes
+            line = line.substring(1, line.length() - 1);
+        }
+
+        // Now split by delimiter, handling escaped quotes
+        StringBuilder currentValue = new StringBuilder();
         boolean inQuotes = false;
-        StringBuilder field = new StringBuilder();
 
         for (int i = 0; i < line.length(); i++) {
             char c = line.charAt(i);
 
             if (c == '"') {
-                if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
-                    // Handle escaped quotes ("")
-                    field.append('"');
-                    i++; // Skip next quote
+                // Check if it's an escaped quote (two consecutive quotes)
+                if (i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    currentValue.append('"');
+                    i++; // Skip the next quote
                 } else {
+                    // Toggle quote state
                     inQuotes = !inQuotes;
                 }
             } else if (c == delimiter.charAt(0) && !inQuotes) {
-                result.add(cleanField(field.toString()));
-                field.setLength(0);
+                // Found a delimiter outside quotes - end of field
+                values.add(currentValue.toString());
+                currentValue = new StringBuilder();
             } else {
-                field.append(c);
+                currentValue.append(c);
             }
         }
 
-        result.add(cleanField(field.toString()));
-        return result;
-    }
+        // Add the last value
+        values.add(currentValue.toString());
 
-    private String cleanField(String field) {
-        String cleaned = field.trim();
-        // Remove surrounding quotes if present
-        if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) {
-            cleaned = cleaned.substring(1, cleaned.length() - 1);
-        }
-        return cleaned;
+        return values;
     }
 
     private String generateInsertStatement(String tableName, List<String> headers, List<String> values) {
@@ -128,41 +179,211 @@ public class AdvancedCsvToSqlGenerator {
         }
 
         StringBuilder sql = new StringBuilder();
-        sql.append("INSERT INTO ").append(quoteColumnNames(headers)).append(" (");
+        sql.append("INSERT INTO `").append(tableName).append("` ");
 
-        // Add column names
-        sql.append(String.join(", ", headers));
+        if (formatSql) {
+            sql.append("\n").append(indentString).append("(");
 
-        sql.append(") VALUES (");
+            // Add column names with backticks (one per line if many columns)
+            if (headers.size() > 5) {
+                for (int i = 0; i < headers.size(); i++) {
+                    sql.append("\n").append(indentString).append(indentString);
+                    sql.append("`").append(headers.get(i)).append("`");
+                    if (i < headers.size() - 1) {
+                        sql.append(",");
+                    }
+                }
+                sql.append("\n").append(indentString);
+            } else {
+                // Short column list on one line
+                for (int i = 0; i < headers.size(); i++) {
+                    sql.append("`").append(headers.get(i)).append("`");
+                    if (i < headers.size() - 1) {
+                        sql.append(", ");
+                    }
+                }
+            }
 
-        // Add values
-        List<String> formattedValues = new ArrayList<>();
-        for (String value : values) {
-            formattedValues.add(formatValue(value));
+            sql.append(")\n");
+            sql.append("VALUES\n").append(indentString).append("(");
+
+            // Add values
+            List<String> formattedValues = new ArrayList<>();
+            for (String value : values) {
+                formattedValues.add(formatValue(value));
+            }
+
+            if (headers.size() > 5) {
+                for (int i = 0; i < formattedValues.size(); i++) {
+                    sql.append("\n").append(indentString).append(indentString);
+                    sql.append(formattedValues.get(i));
+                    if (i < formattedValues.size() - 1) {
+                        sql.append(",");
+                    }
+                }
+                sql.append("\n").append(indentString);
+            } else {
+                sql.append(String.join(", ", formattedValues));
+            }
+
+            sql.append(");");
+        } else {
+            // Compact format (original)
+            sql.append("(");
+            for (int i = 0; i < headers.size(); i++) {
+                sql.append("`").append(headers.get(i)).append("`");
+                if (i < headers.size() - 1) {
+                    sql.append(", ");
+                }
+            }
+            sql.append(") VALUES (");
+
+            List<String> formattedValues = new ArrayList<>();
+            for (String value : values) {
+                formattedValues.add(formatValue(value));
+            }
+            sql.append(String.join(", ", formattedValues));
+            sql.append(");");
         }
-
-        sql.append(String.join(", ", formattedValues));
-        sql.append(");");
 
         return sql.toString();
     }
 
-    private String quoteColumnNames(List<String> columns) {
-        List<String> quotedColumns = new ArrayList<>();
-        for (String column : columns) {
-            quotedColumns.add("`" + column + "`"); // MySQL-style quoting
+    /**
+     * Generate a batch INSERT statement for multiple rows
+     * Format: INSERT INTO table (col1, col2) VALUES (val1, val2), (val3, val4), ...;
+     */
+    private String generateBatchInsertStatement(String tableName, List<String> headers, List<List<String>> rows) {
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("Cannot generate batch INSERT with no rows");
         }
-        return String.join(", ", quotedColumns);
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("INSERT INTO `").append(tableName).append("`");
+
+        if (formatSql) {
+            sql.append("\n").append(indentString).append("(");
+
+            // Add column names (one per line if many columns)
+            if (headers.size() > 5) {
+                for (int i = 0; i < headers.size(); i++) {
+                    sql.append("\n").append(indentString).append(indentString);
+                    sql.append("`").append(headers.get(i)).append("`");
+                    if (i < headers.size() - 1) {
+                        sql.append(",");
+                    }
+                }
+                sql.append("\n").append(indentString);
+            } else {
+                // Short column list on one line
+                for (int i = 0; i < headers.size(); i++) {
+                    sql.append("`").append(headers.get(i)).append("`");
+                    if (i < headers.size() - 1) {
+                        sql.append(", ");
+                    }
+                }
+            }
+
+            sql.append(")\n");
+            sql.append("VALUES\n");
+
+            // Add each row's values
+            for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+                List<String> values = rows.get(rowIndex);
+
+                if (values.size() != headers.size()) {
+                    throw new IllegalArgumentException(
+                            String.format("Row %d: Header count (%d) doesn't match value count (%d)",
+                                    rowIndex, headers.size(), values.size()));
+                }
+
+                sql.append(indentString).append("(");
+
+                // Add formatted values
+                List<String> formattedValues = new ArrayList<>();
+                for (String value : values) {
+                    formattedValues.add(formatValue(value));
+                }
+
+                if (headers.size() > 5) {
+                    // Many columns: one value per line
+                    for (int i = 0; i < formattedValues.size(); i++) {
+                        sql.append("\n").append(indentString).append(indentString);
+                        sql.append(formattedValues.get(i));
+                        if (i < formattedValues.size() - 1) {
+                            sql.append(",");
+                        }
+                    }
+                    sql.append("\n").append(indentString);
+                } else {
+                    // Few columns: all on one line
+                    sql.append(String.join(", ", formattedValues));
+                }
+
+                sql.append(")");
+
+                // Add comma between rows, semicolon after last row
+                if (rowIndex < rows.size() - 1) {
+                    sql.append(",\n");
+                } else {
+                    sql.append(";");
+                }
+            }
+        } else {
+            // Compact format (original)
+            sql.append(" (");
+            for (int i = 0; i < headers.size(); i++) {
+                sql.append("`").append(headers.get(i)).append("`");
+                if (i < headers.size() - 1) {
+                    sql.append(", ");
+                }
+            }
+            sql.append(") VALUES ");
+
+            // Add each row's values
+            for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+                List<String> values = rows.get(rowIndex);
+
+                if (values.size() != headers.size()) {
+                    throw new IllegalArgumentException(
+                            String.format("Row %d: Header count (%d) doesn't match value count (%d)",
+                                    rowIndex, headers.size(), values.size()));
+                }
+
+                sql.append("(");
+
+                List<String> formattedValues = new ArrayList<>();
+                for (String value : values) {
+                    formattedValues.add(formatValue(value));
+                }
+
+                sql.append(String.join(", ", formattedValues));
+                sql.append(")");
+
+                if (rowIndex < rows.size() - 1) {
+                    sql.append(",\n");
+                } else {
+                    sql.append(";");
+                }
+            }
+        }
+
+        return sql.toString();
     }
 
     private String formatValue(String value) {
-        if (value == null || value.isEmpty()) {
+        if (value == null || value.trim().isEmpty()) {
             return "NULL";
         }
 
-        // Check if value is a date (could be customizable based on the format in your CSV)
+        // Check for NULL string
+        if ("NULL".equalsIgnoreCase(value.trim())) {
+            return "NULL";
+        }
+
+        // Check if value is a date
         if (isDate(value)) {
-            return "'" + formatDate(value) + "'";
+            return "'" + value + "'";
         }
 
         // Check for numeric values
@@ -173,11 +394,6 @@ public class AdvancedCsvToSqlGenerator {
         // Check for boolean values
         if (isBoolean(value)) {
             return value.toUpperCase();
-        }
-
-        // Check for NULL string
-        if ("NULL".equalsIgnoreCase(value)) {
-            return "NULL";
         }
 
         // Escape single quotes and wrap in quotes for strings
@@ -203,21 +419,12 @@ public class AdvancedCsvToSqlGenerator {
 
     private boolean isDate(String value) {
         try {
-            new SimpleDateFormat("yyyy-MM-dd").parse(value);
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+            sdf.setLenient(false);
+            sdf.parse(value);
             return true;
         } catch (ParseException e) {
             return false;
-        }
-    }
-
-    private String formatDate(String value) {
-        try {
-            SimpleDateFormat inputFormat = new SimpleDateFormat("yyyy-MM-dd");
-            Date date = inputFormat.parse(value);
-            SimpleDateFormat outputFormat = new SimpleDateFormat("yyyy-MM-dd");
-            return outputFormat.format(date);
-        } catch (ParseException e) {
-            return value; // Return the original value if not a valid date
         }
     }
 
@@ -234,18 +441,29 @@ public class AdvancedCsvToSqlGenerator {
         this.delimiter = delimiter;
     }
 
-    public static void main(String[] args) {
-        if (args.length < 2) {
-            System.out.println("Usage: java AdvancedCsvToSqlGenerator <csvFile> <tableName> [options]");
-            System.out.println("Options:");
-            System.out.println("  -t    Include transaction statements");
-            System.out.println("  -e    Encoding (default: UTF-8)");
-            System.out.println("  -d    Delimiter (default: ,)");
-            return;
-        }
+    public void setUseBatchInsert(boolean useBatchInsert) {
+        this.useBatchInsert = useBatchInsert;
+    }
 
-        String csvFile = args[0];
-        String tableName = args[1];
+    public void setBatchSize(int batchSize) {
+        if (batchSize <= 0) {
+            throw new IllegalArgumentException("Batch size must be positive");
+        }
+        this.batchSize = batchSize;
+    }
+
+    public void setFormatSql(boolean formatSql) {
+        this.formatSql = formatSql;
+    }
+
+    public void setIndentString(String indentString) {
+        this.indentString = indentString;
+    }
+
+    public static void main(String[] args) {
+        // Accept command line arguments or use defaults
+        String csvFile = args.length > 0 ? args[0] : "/home/vikunalabs/workspace/code/common/src/main/java/com/vikunalabs/common/sqlgen/db_output.csv";
+        String tableName = args.length > 1 ? args[1] : "test_table";
 
         AdvancedCsvToSqlGenerator generator = new AdvancedCsvToSqlGenerator();
 
@@ -263,6 +481,44 @@ public class AdvancedCsvToSqlGenerator {
                 case "-d":
                     if (i + 1 < args.length) {
                         generator.setDelimiter(args[++i]);
+                    }
+                    break;
+                case "-b":
+                case "--batch":
+                    generator.setUseBatchInsert(true);
+                    break;
+                case "-bs":
+                case "--batch-size":
+                    if (i + 1 < args.length) {
+                        try {
+                            int size = Integer.parseInt(args[++i]);
+                            generator.setBatchSize(size);
+                            generator.setUseBatchInsert(true); // Auto-enable batch mode
+                        } catch (NumberFormatException e) {
+                            System.err.println("Invalid batch size: " + args[i]);
+                        }
+                    }
+                    break;
+                case "-f":
+                case "--format":
+                    generator.setFormatSql(true);
+                    break;
+                case "--no-format":
+                    generator.setFormatSql(false);
+                    break;
+                case "--indent":
+                    if (i + 1 < args.length) {
+                        String indent = args[++i];
+                        // Support special values
+                        if ("tab".equalsIgnoreCase(indent)) {
+                            generator.setIndentString("\t");
+                        } else if (indent.matches("\\d+")) {
+                            // Number means that many spaces
+                            int spaces = Integer.parseInt(indent);
+                            generator.setIndentString(" ".repeat(spaces));
+                        } else {
+                            generator.setIndentString(indent);
+                        }
                     }
                     break;
             }
@@ -284,7 +540,16 @@ public class AdvancedCsvToSqlGenerator {
                     writer.newLine();
                 }
             }
-            System.out.println("\nGenerated " + sqlStatements.size() + " INSERT statements");
+
+            int statementCount = sqlStatements.size();
+            if (generator.includeTransaction) {
+                statementCount -= 2; // Subtract START TRANSACTION and COMMIT
+            }
+
+            System.out.println("\nGenerated " + statementCount + " INSERT statement(s)");
+            if (generator.useBatchInsert) {
+                System.out.println("Batch mode: " + generator.batchSize + " rows per statement");
+            }
             System.out.println("Saved to: " + outputFile);
 
         } catch (Exception e) {
