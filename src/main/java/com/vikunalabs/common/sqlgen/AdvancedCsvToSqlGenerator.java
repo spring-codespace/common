@@ -1,5 +1,7 @@
 package com.vikunalabs.common.sqlgen;
 
+import org.apache.commons.csv.*;
+
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -12,7 +14,7 @@ public class AdvancedCsvToSqlGenerator {
     private String delimiter;
 
     public AdvancedCsvToSqlGenerator() {
-        this.includeTransaction = false;
+        this.includeTransaction = true;
         this.encoding = "UTF-8";
         this.delimiter = ",";
     }
@@ -30,50 +32,39 @@ public class AdvancedCsvToSqlGenerator {
     public List<String> generateSqlFromCsv(String csvFile, String tableName,
                                            Map<String, String> columnMappings) throws IOException {
         List<String> sqlStatements = new ArrayList<>();
-        List<String> headers = new ArrayList<>();
 
-        if (includeTransaction) {
-            sqlStatements.add("START TRANSACTION;");
-        }
+        // Use Apache Commons CSV for reading CSV
+        try (Reader reader = Files.newBufferedReader(Paths.get(csvFile), StandardCharsets.UTF_8)) {
+            CSVParser csvParser = new CSVParser(reader, CSVFormat.DEFAULT.withDelimiter(delimiter.charAt(0)).withFirstRecordAsHeader().withIgnoreHeaderCase().withTrim());
 
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(Files.newInputStream(Paths.get(csvFile)), encoding))) {
-            String line;
-            boolean isFirstLine = true;
-            int lineNumber = 0;
+            List<String> headers = new ArrayList<>(csvParser.getHeaderMap().keySet());
 
-            while ((line = reader.readLine()) != null) {
-                lineNumber++;
-
-                if (line.trim().isEmpty()) {
-                    continue;
-                }
-
-                try {
-                    if (isFirstLine) {
-                        headers = parseCsvLine(line);
-                        isFirstLine = false;
-                    } else {
-                        List<String> values = parseCsvLine(line);
-
-                        // Apply column mappings if provided
-                        List<String> mappedHeaders = headers;
-                        if (columnMappings != null) {
-                            mappedHeaders = new ArrayList<>();
-                            for (String header : headers) {
-                                mappedHeaders.add(columnMappings.getOrDefault(header, header));
-                            }
-                        }
-
-                        String sql = generateInsertStatement(tableName, mappedHeaders, values);
-                        sqlStatements.add(sql);
-                    }
-                } catch (IllegalArgumentException e) {
-                    System.err.println("Invalid data format at line " + lineNumber + ": " + e.getMessage());
-                } catch (Exception e) {
-                    System.err.println("Unexpected error at line " + lineNumber + ": " + e.getMessage());
-                }
+            if (includeTransaction) {
+                sqlStatements.add("START TRANSACTION;");
             }
+
+            // Process each record (row)
+            for (CSVRecord record : csvParser) {
+                // Apply column mappings if provided
+                List<String> mappedHeaders = headers;
+                if (columnMappings != null) {
+                    mappedHeaders = new ArrayList<>();
+                    for (String header : headers) {
+                        mappedHeaders.add(columnMappings.getOrDefault(header, header));
+                    }
+                }
+
+                List<String> values = new ArrayList<>();
+                for (String header : mappedHeaders) {
+                    values.add(record.get(header)); // Get the value of each header in the current row
+                }
+
+                String sql = generateInsertStatement(tableName, mappedHeaders, values);
+                sqlStatements.add(sql);
+            }
+        } catch (Exception e) {
+            System.err.println("Error reading CSV: " + e.getMessage());
+            e.printStackTrace();
         }
 
         if (includeTransaction) {
@@ -83,43 +74,6 @@ public class AdvancedCsvToSqlGenerator {
         return sqlStatements;
     }
 
-    private List<String> parseCsvLine(String line) {
-        List<String> result = new ArrayList<>();
-        boolean inQuotes = false;
-        StringBuilder field = new StringBuilder();
-
-        for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
-
-            if (c == '"') {
-                if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
-                    // Handle escaped quotes ("")
-                    field.append('"');
-                    i++; // Skip next quote
-                } else {
-                    inQuotes = !inQuotes;
-                }
-            } else if (c == delimiter.charAt(0) && !inQuotes) {
-                result.add(cleanField(field.toString()));
-                field.setLength(0);
-            } else {
-                field.append(c);
-            }
-        }
-
-        result.add(cleanField(field.toString()));
-        return result;
-    }
-
-    private String cleanField(String field) {
-        String cleaned = field.trim();
-        // Remove surrounding quotes if present
-        if (cleaned.startsWith("\"") && cleaned.endsWith("\"")) {
-            cleaned = cleaned.substring(1, cleaned.length() - 1);
-        }
-        return cleaned;
-    }
-
     private String generateInsertStatement(String tableName, List<String> headers, List<String> values) {
         if (headers.size() != values.size()) {
             throw new IllegalArgumentException(
@@ -127,11 +81,18 @@ public class AdvancedCsvToSqlGenerator {
                             headers.size(), values.size()));
         }
 
+        // Correct SQL generation with backticks around column names
         StringBuilder sql = new StringBuilder();
-        sql.append("INSERT INTO ").append(quoteColumnNames(headers)).append(" (");
+        sql.append("INSERT INTO `").append(tableName).append("` (");
 
-        // Add column names
-        sql.append(String.join(", ", headers));
+        // Add column names, properly enclosed with backticks
+        for (int i = 0; i < headers.size(); i++) {
+            // Add backticks around each column name
+            sql.append("`").append(headers.get(i)).append("`");
+            if (i < headers.size() - 1) {
+                sql.append(", "); // Add a comma if it's not the last column
+            }
+        }
 
         sql.append(") VALUES (");
 
@@ -146,6 +107,7 @@ public class AdvancedCsvToSqlGenerator {
 
         return sql.toString();
     }
+
 
     private String quoteColumnNames(List<String> columns) {
         List<String> quotedColumns = new ArrayList<>();
@@ -235,17 +197,9 @@ public class AdvancedCsvToSqlGenerator {
     }
 
     public static void main(String[] args) {
-        if (args.length < 2) {
-            System.out.println("Usage: java AdvancedCsvToSqlGenerator <csvFile> <tableName> [options]");
-            System.out.println("Options:");
-            System.out.println("  -t    Include transaction statements");
-            System.out.println("  -e    Encoding (default: UTF-8)");
-            System.out.println("  -d    Delimiter (default: ,)");
-            return;
-        }
 
-        String csvFile = args[0];
-        String tableName = args[1];
+        String csvFile = "/home/vikunalabs/workspace/code/common/src/main/java/com/vikunalabs/common/sqlgen/input.csv";
+        String tableName = "test_table";
 
         AdvancedCsvToSqlGenerator generator = new AdvancedCsvToSqlGenerator();
 
