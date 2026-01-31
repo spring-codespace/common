@@ -189,6 +189,7 @@ public class AdvancedCsvToSqlGenerator {
                 for (int i = 0; i < headers.size(); i++) {
                     sql.append("\n").append(indentString).append(indentString);
                     sql.append(headers.get(i));
+
                     if (i < headers.size() - 1) {
                         sql.append(",");
                     }
@@ -197,7 +198,9 @@ public class AdvancedCsvToSqlGenerator {
             } else {
                 // Short column list on one line
                 for (int i = 0; i < headers.size(); i++) {
+                  
                     sql.append(headers.get(i));
+
                     if (i < headers.size() - 1) {
                         sql.append(", ");
                     }
